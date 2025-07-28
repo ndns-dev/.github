@@ -92,37 +92,50 @@ sequenceDiagram
 
 ## 🌐 라우팅 및 헬스체크 아키텍처 (Routing & Health Check Architecture)
 
-NDNS는 단순한 라운드 로빈 방식이 아닌, 각 API 서버의 실제 부하와 상태를 기반으로 지능적인 라우팅을 수행합니다. 이를 통해 특정 서버의 과부하를 방지하고 사용자에게 최상의 응답성을 제공합니다. 아래 다이어그램은 이 과정을 설명합니다.
+NDNS는 단순한 라운드 로빈 방식이 아닌, 각 API 서버의 실제 부하와 상태를 기반으로 지능적인 라우팅을 수행합니다. 이를 통해 특정 서버의 과부하를 방지하고 사용자에게 최상의 응답성을 제공합니다. 또한, 여러 단계의 보안 설정을 통해 시스템을 보호합니다.
 
 ```mermaid
 graph TD
-    subgraph "주기적인 메트릭 수집 (1분마다)"
-        A[AWS EventBridge] -- Triggers --> B(AWS Lambda);
-        B -- "1. GET /metrics" --> C[API Server 1];
-        B -- "2. GET /metrics" --> D[API Server 2];
-        B -- "3. GET /metrics" --> E[API Server N];
-        C -- "Prometheus Metrics" --> B;
-        D -- "Prometheus Metrics" --> B;
-        E -- "Prometheus Metrics" --> B;
-        B -- "4. Push Metrics" --> F[Prometheus Server];
-        B -- "5. Update Server Status" --> G_Router(Router);
-    end
-
     subgraph "사용자 요청 처리"
-        H[Client] -- "API Request" --> G_Router;
-        G_Router -- "Selects optimal server" --> G_Router;
-        G_Router -- "Proxies Request" --> D;
+        Client -- "API Request" --> Router;
+        Router -- "Whitelist Check" --> Router_Decision{Request Allowed?};
+        Router_Decision -- "Yes" --> Proxy;
+        Router_Decision -- "No (Not in Whitelist)" --> Reject[/"404 Not Found"/];
+        subgraph "VPC"
+            subgraph "API Server Security Group (Allow Router & Lambda only)"
+                direction LR
+                API1[API Server 1];
+                API2[API Server 2];
+                APIN[API Server N];
+            end
+        end
+        Proxy -- "Proxies to Optimal Server" --> API2;
     end
 
-    style G_Router fill:#f9f,stroke:#333,stroke-width:2px
+    subgraph "주기적인 메트릭 수집 (1분마다)"
+        EventBridge[AWS EventBridge] -- Triggers --> Lambda[AWS Lambda];
+        Lambda -- "GET /metrics" --> API1;
+        Lambda -- "GET /metrics" --> API2;
+        Lambda -- "GET /metrics" --> APIN;
+        API1 --> Lambda;
+        API2 --> Lambda;
+        APIN --> Lambda;
+        Lambda -- "Push Metrics" --> Prometheus[Prometheus Server];
+        Lambda -- "Update Server Status" --> Router;
+    end
+
+    style Router fill:#f9f,stroke:#333,stroke-width:2px
 ```
 
-1.  **주기적인 상태 수집**: `AWS EventBridge`가 1분마다 `AWS Lambda` 함수를 트리거합니다.
-2.  **메트릭 수집**: `Lambda` 함수는 실행 중인 모든 `API Server`의 `/metrics` 엔드포인트에 접근하여 Prometheus 형식의 메트릭(CPU, 메모리 사용량, 응답 시간 등)을 수집합니다.
-3.  **메트릭 전송 및 저장**: 수집된 메트릭은 장기적인 모니터링 및 분석을 위해 중앙 `Prometheus Server`로 전송됩니다.
-4.  **라우터 상태 갱신**: 동시에, `Lambda`는 수집한 메트릭을 `Router` 서버로 직접 전달합니다.
-5.  **최적 서버 판단**: `Router`는 전달받은 메트릭을 기반으로 현재 가장 부하가 적고 응답성이 좋은 '최적의 API 서버' 목록을 실시간으로 갱신합니다.
-6.  **지능형 프록시**: 클라이언트로부터 API 요청이 들어오면, `Router`는 이 목록을 참조하여 가장 최적의 `API Server`로 요청을 프록시합니다.
+### 보안 강화 (Security Enhancements)
+
+1.  **라우터 레벨 접근 제어 (Nginx Whitelist)**
+    *   `Router` 서버(Nginx)는 사전에 정의된 API 엔드포인트에 대한 요청만 허용하는 **화이트리스트** 기반으로 동작합니다.
+    *   화이트리스트에 존재하지 않는 모든 경로로의 요청은 `404 Not Found`로 처리되어, 불필요한 내부 시스템 접근을 원천적으로 차단합니다.
+
+2.  **네트워크 레벨 접근 제어 (AWS Security Group)**
+    *   각 `API Server`는 **라우터 서버**와 **AWS Lambda**의 IP 주소에서 오는 트래픽만 허용하도록 AWS 보안 그룹(Security Group)이 설정되어 있습니다.
+    *   이를 통해 라우터를 우회하여 API 서버에 직접 접근하는 것을 막아 시스템의 보안을 강화합니다.
 
 ## 🛠️ 기술 스택 (Tech Stack)
 
