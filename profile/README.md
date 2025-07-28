@@ -38,7 +38,7 @@ sequenceDiagram
     note over API 서버: 1차 분석 프로세스 실행 (자세한 내용은 하단 참조)
     API 서버->>SQS: 이미지 OCR 필요 시 SQS에 작업 전송
 
-    API 서버-->>라우터: 1차 분석 결과 (광고 여부+대기 상태), 헤더: X-SSE-Token, X-Req-Id
+    API 서버-->>라우터: 1차 분석 결과 (협찬 여부+대기 상태), 헤더: X-SSE-Token, X-Req-Id
     라우터-->>클라이언트: 응답 전송
 
     클라이언트->>라우터: SSE 연결 요청 (/stream?sseId=ReqId, with SSE-Token)
@@ -59,7 +59,7 @@ sequenceDiagram
 ```mermaid
 graph TD
     A[시작: 새 포스트 분석] --> B{설명 확인};
-    B -- "협찬 문구 발견" --> C[광고로 표시];
+    B -- "협찬 문구 발견" --> C[협찬으로 표시];
     B -- "협찬 문구 없음" --> D[포스트 본문 전체 크롤링];
     D --> E{작성일 >= 2025년?};
     E -- "예" --> F[첫 문단 분석];
@@ -75,24 +75,24 @@ graph TD
 
 </details>
 
-## 🖼️ 비동기 OCR 아키텍처 (Asynchronous OCR Architecture)
+## 🖼️ OCR 아키텍처 (OCR Architecture)
 
 <details>
-<summary>클릭하여 비동기 OCR 아키텍처 보기</summary>
+<summary>클릭하여 OCR 아키텍처 보기</summary>
 
 ```mermaid
 graph TD
-    subgraph "비동기 OCR 처리"
-        A[SQS] -- "1. OCR 작업 수신" --> B(OCR Lambda - Go);
-        B -- "2. Tesseract 데이터 가져오기" --> S3[(S3 버킷)];
-        B -- "3. 이미지 URL 로드" --> Image[이미지];
-        Image --> Size_Check{4. 이미지 크기 확인};
+    subgraph "OCR 처리"
+        A[SQS] -- "OCR 작업 수신" --> B(OCR Lambda - Go);
+        B -- "Tesseract 데이터 가져오기" --> S3[(S3 버킷)];
+        B -- "이미지 URL 로드" --> Image[이미지];
+        Image --> Size_Check{이미지 크기 확인};
         Size_Check -- "임계값 초과" --> Resize[이미지 리사이징];
-        Size_Check -- "임계값 이하" --> Perform_OCR[5. OCR 수행];
+        Size_Check -- "임계값 이하" --> Perform_OCR[OCR 수행];
         Resize --> Perform_OCR;
-        Perform_OCR -- "6. OCR 결과" --> B;
-        B -- "7. POST /api/v1/search/analyze/cycle" --> 라우터;
-        라우터 -- "8. API 서버로 프록시" --> API_서버[API 서버];
+        Perform_OCR -- "OCR 결과" --> B;
+        B -- "POST /api/v1/search/analyze/cycle" --> 라우터;
+        라우터 -- "API 서버로 프록시" --> API_서버[API 서버];
     end
 ```
 
