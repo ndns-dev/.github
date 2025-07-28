@@ -13,7 +13,8 @@ NDNS는 네이버 블로그 검색 결과에 포함된 수많은 포스트 중�
 
 ## ⚙️ 전체 시스템 아키텍처 (Overall System Architecture)
 
-아래 다이어그램은 NDNS의 핵심 동작 방식을 보여줍니다. 클라이언트의 검색 요청부터 시작하여, 내부 서버의 분석 과정과 비동기적인 OCR 처리 후 최종 결과를 받기까지의 전체 흐름을 나타냅니다.
+<details>
+<summary>클릭하여 전체 시스템 아키텍처 보기</summary>
 
 ```mermaid
 sequenceDiagram
@@ -48,14 +49,17 @@ sequenceDiagram
     라우터->>클라이언트: SSE 메시지 전송 (요청 ID 채널)
 ```
 
+</details>
+
 ## 🔬 1차 분석 프로세스 (Initial Analysis Process)
 
-API 서버는 검색 결과로 얻은 새로운 포스트에 대해 다음과 같은 다단계 분석 프로세스를 수행하여 광고 여부를 1차적으로 판별합니다.
+<details>
+<summary>클릭하여 1차 분석 프로세스 보기</summary>
 
 ```mermaid
 graph TD
     A[시작: 새 포스트 분석] --> B{설명 확인};
-    B -- "협찬 문구 발견" --> C[협찬으로 표시];
+    B -- "협찬 문구 발견" --> C[광고로 표시];
     B -- "협찬 문구 없음" --> D[포스트 본문 전체 크롤링];
     D --> E{작성일 >= 2025년?};
     E -- "예" --> F[첫 문단 분석];
@@ -69,27 +73,35 @@ graph TD
     J --> K[분석 대기로 표시];
 ```
 
+</details>
+
 ## 🖼️ 비동기 OCR 아키텍처 (Asynchronous OCR Architecture)
 
-1차 분석에서 광고가 탐지되지 않은 포스트의 이미지들은 SQS를 통해 비동기적으로 OCR 분석이 진행됩니다. 이 과정은 Go로 작성된 별도의 Lambda 함수에서 처리됩니다.
+<details>
+<summary>클릭하여 비동기 OCR 아키텍처 보기</summary>
 
 ```mermaid
 graph TD
     subgraph "비동기 OCR 처리"
-        A[SQS] -- "OCR 작업 수신" --> B(OCR Lambda - Go);
-        B -- "Tesseract 데이터 가져오기" --> S3[(S3 버킷)];
-        B -- "이미지 URL 로드" --> Image[이미지];
-        Image --> Size_Check{이미지 크기 확인};
+        A[SQS] -- "1. OCR 작업 수신" --> B(OCR Lambda - Go);
+        B -- "2. Tesseract 데이터 가져오기" --> S3[(S3 버킷)];
+        B -- "3. 이미지 URL 로드" --> Image[이미지];
+        Image --> Size_Check{4. 이미지 크기 확인};
         Size_Check -- "임계값 초과" --> Resize[이미지 리사이징];
-        Size_Check -- "임계값 이하" --> Perform_OCR[OCR 수행];
+        Size_Check -- "임계값 이하" --> Perform_OCR[5. OCR 수행];
         Resize --> Perform_OCR;
-        Perform_OCR -- "OCR 결과 POST /api/v1/search/analyze/cycle" --> 라우터;
+        Perform_OCR -- "6. OCR 결과" --> B;
+        B -- "7. POST /api/v1/search/analyze/cycle" --> 라우터;
+        라우터 -- "8. API 서버로 프록시" --> API_서버[API 서버];
     end
 ```
 
+</details>
+
 ## 🌐 라우팅 및 헬스체크 아키텍처 (Routing & Health Check Architecture)
 
-NDNS는 단순한 라운드 로빈 방식이 아닌, 각 API 서버의 실제 부하와 상태를 기반으로 지능적인 라우팅을 수행합니다. 이를 통해 특정 서버의 과부하를 방지하고 사용자에게 최상의 응답성을 제공합니다. 또한, 여러 단계의 보안 설정을 통해 시스템을 보호합니다.
+<details>
+<summary>클릭하여 라우팅 및 헬스체크 아키텍처 보기</summary>
 
 ```mermaid
 graph TD
@@ -110,7 +122,7 @@ graph TD
     end
 
     subgraph "주기적인 메트릭 수집 (1분마다)"
-        EventBridge[AWS EventBridge] --> 메트릭_Lambda(메트릭 Lambda - Python);
+        EventBridge[AWS EventBridge] -- "트리거" --> 메트릭_Lambda(메트릭 Lambda - Python);
         메트릭_Lambda -- "GET /metrics" --> API_서버_1;
         메트릭_Lambda -- "GET /metrics" --> API_서버_2;
         메트릭_Lambda -- "GET /metrics" --> API_서버_N;
@@ -123,6 +135,8 @@ graph TD
 
     style 라우터 fill:#f9f,stroke:#333,stroke-width:2px
 ```
+
+</details>
 
 ### 보안 강화 (Security Enhancements)
 
