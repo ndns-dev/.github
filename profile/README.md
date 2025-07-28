@@ -11,82 +11,79 @@ NDNS는 네이버 블로그 검색 결과에 포함된 수많은 포스트 중�
 -   **비동기 업데이트**: 초기 분석 후 이미지 OCR과 같이 시간이 소요되는 작업은 비동기적으로 처리되며, Server-Sent Events(SSE)를 통해 클라이언트에 점진적으로 업데이트된 결과를 전송합니다.
 -   **확장 가능한 아키텍처**: Go 기반의 API 서버와 AWS Lambda, SQS, DynamoDB 등 클라우드 네이티브 기술을 활용하여 트래픽 변화에 유연하게 대응할 수 있도록 설계되었습니다.
 
-## ⚙️ 시스템 아키텍처 (System Architecture)
+## ⚙️ 전체 시스템 아키텍처 (Overall System Architecture)
 
 아래 다이어그램은 NDNS의 핵심 동작 방식을 보여줍니다. 클라이언트의 검색 요청부터 시작하여, 내부 서버의 분석 과정과 비동기적인 OCR 처리 후 최종 결과를 받기까지의 전체 흐름을 나타냅니다.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Client
-    participant Router
-    participant APIServer
-    participant NaverAPI
+    participant 클라이언트
+    participant 라우터
+    participant API 서버
+    participant 네이버 API
     participant DynamoDB
-    participant LambdaOCR
+    participant OCR Lambda
     participant SQS
 
-    Client->>Router: 1. /api/v1/search (searchQuery)
-    Router->>APIServer: Proxy /api/v1/search
-    APIServer->>NaverAPI: 네이버 검색 API 호출
-    NaverAPI-->>APIServer: 검색결과 (10개 포스트)
+    클라이언트->>라우터: 1. /api/v1/search (검색어)
+    라우터->>API 서버: 요청 프록시
+    API 서버->>네이버 API: 네이버 검색 API 호출
+    네이버 API-->>API 서버: 검색결과 (10개 포스트)
 
-    APIServer->>DynamoDB: getExistingPosts(links) - AnalyzedResult 테이블 조회
-    DynamoDB-->>APIServer: 기존 분석 결과 반환
+    API 서버->>DynamoDB: 기존 분석 결과 조회
+    DynamoDB-->>API 서버: 기존 분석 결과 반환
 
-    note over APIServer: 기존 분석된 포스트를 제외하고, 새 포스트에 대해서만 병렬 goroutine 실행
+    note over API 서버: 1차 분석 프로세스 실행 (자세한 내용은 하단 참조)
+    API 서버->>SQS: 이미지 OCR 필요 시 SQS에 작업 전송
 
-    loop for each new post
-        APIServer->>APIServer: 작성일 확인 (2025년 이후?)
-        APIServer->>APIServer: Description에 협찬문구 있는지 검사
-        alt 협찬 문구 있음
-            APIServer->>APIServer: updateAnalyzedResponse(indicators append)
-        else 협찬 문구 없음
-            APIServer->>APIServer: 포스트 본문 크롤링
+    API 서버-->>라우터: 1차 분석 결과 (광고 여부+대기 상태), 헤더: X-SSE-Token, X-Req-Id
+    라우터-->>클라이언트: 응답 전송
 
-            alt 2025년 이후
-                APIServer->>APIServer: First 문단 분석
-            else 2025년 이전
-                APIServer->>APIServer: First + Last 문단 분석
-            end
+    클라이언트->>라우터: SSE 연결 요청 (/stream?sseId=ReqId, with SSE-Token)
+    note over 클라이언트, 라우터: SSE 연결 완료
 
-            alt 문단에서 협찬문구 있음
-                APIServer->>APIServer: updateAnalyzedResponse
-            else 없음
-                APIServer->>APIServer: 이미지 도메인 분석
-                alt 협찬 이미지 도메인
-                    APIServer->>APIServer: updateAnalyzedResponse
-                else 협찬 이미지 도메인 아님
-                    APIServer->>SQS: 이미지 OCR 요청
-                end
-            end
-        end
-    end
+    note over SQS, OCR Lambda: 비동기 OCR 프로세스 실행 (자세한 내용은 하단 참조)
+    OCR Lambda->>라우터: OCR 분석 결과 전달 (요청 ID 포함)
+    라우터->>클라이언트: SSE 메시지 전송 (요청 ID 채널)
+```
 
-    note over APIServer: 기존 분석 결과 + 새 포스트 분석 결과 + OCR 요청 보낸 pendingData 취합
+## 🔬 1차 분석 프로세스 (Initial Analysis Process)
 
-    APIServer-->>Router: 1차 분석 결과 (isSponsored + pending 포함), 헤더: X-SSE-Token, X-Req-Id
-    Router-->>Client: 응답 전송
+API 서버는 검색 결과로 얻은 새로운 포스트에 대해 다음과 같은 다단계 분석 프로세스를 수행하여 광고 여부를 1차적으로 판별합니다.
 
-    Client->>Router: SSE 연결 요청 (/stream?sseId=ReqId, with SSE-Token)
-    note over Client, Router: SSE 연결 완료
+```mermaid
+graph TD
+    A[시작: 새 포스트 분석] --> B{설명 확인};
+    B -- "협찬 문구 발견" --> C[협찬으로 표시];
+    B -- "협찬 문구 없음" --> D[포스트 본문 전체 크롤링];
+    D --> E{작성일 >= 2025년?};
+    E -- "예" --> F[첫 문단 분석];
+    E -- "아니오" --> G[첫 문단 + 마지막 문단 분석];
+    F --> H{협찬 문구 발견?};
+    G --> H;
+    H -- "예" --> C;
+    H -- "아니오" --> I[이미지 도메인 분석];
+    I -- "협찬 도메인 발견" --> C;
+    I -- "협찬 도메인 없음" --> J[비동기 OCR 대기열에 추가];
+    J --> K[분석 대기로 표시];
+```
 
-    loop Lambda 처리 순환
-        SQS-->>LambdaOCR: 이미지 OCR 요청 수신
-        LambdaOCR->>APIServer: OCR Text POST 요청
-        APIServer->>APIServer: OCR Text 내 협찬 문구 분석
+## 🖼️ 비동기 OCR 아키텍처 (Asynchronous OCR Architecture)
 
-        alt 협찬 문구 있음
-            APIServer->>Router: 분석 결과 전달 (reqId 포함)
-            Router->>Client: SSE 메시지 전송 (reqId 채널)
-        else 협찬 문구 없음
-            alt 다음 이미지 존재
-                APIServer->>SQS: 다음 이미지 OCR 요청
-            else 이미지 없음 (최종 결과)
-                APIServer->>Router: 최종 분석결과 전송 (협찬 아님)
-                Router->>Client: SSE 메시지 전송
-            end
-        end
+1차 분석에서 광고가 탐지되지 않은 포스트의 이미지들은 SQS를 통해 비동기적으로 OCR 분석이 진행됩니다. 이 과정은 Go로 작성된 별도의 Lambda 함수에서 처리됩니다.
+
+```mermaid
+graph TD
+    subgraph "비동기 OCR 처리"
+        A[SQS] -- "OCR 작업 수신" --> B(OCR Lambda - Go);
+        B -- "Tesseract 데이터 가져오기" --> S3[(S3 버킷)];
+        B -- "이미지 URL 로드" --> Image[이미지];
+        Image --> Size_Check{이미지 크기 확인};
+        Size_Check -- "임계값 초과" --> Resize[이미지 리사이징];
+        Size_Check -- "임계값 이하" --> Perform_OCR[OCR 수행];
+        Resize --> Perform_OCR;
+        Perform_OCR -- "OCR 결과 POST /api/v1/search/analyze/cycle" --> 라우터;
     end
 ```
 
@@ -97,40 +94,40 @@ NDNS는 단순한 라운드 로빈 방식이 아닌, 각 API 서버의 실제 �
 ```mermaid
 graph TD
     subgraph "사용자 요청 처리"
-        Client -- "API Request" --> Router;
-        Router -- "Whitelist Check" --> Router_Decision{Request Allowed?};
-        Router_Decision -- "Yes" --> Proxy;
-        Router_Decision -- "No (Not in Whitelist)" --> Reject[/"404 Not Found"/];
+        클라이언트 -- "API 요청" --> 라우터;
+        라우터 -- "화이트리스트 확인" --> 라우터_결정{요청 허용?};
+        라우터_결정 -- "예" --> 프록시;
+        라우터_결정 -- "아니오 (허용 목록에 없음)" --> 요청_거부[/"404 Not Found"/];
         subgraph "VPC"
-            subgraph "API Server Security Group (Allow Router & Lambda only)"
+            subgraph "API 서버 보안 그룹 (라우터 & Lambda만 허용)"
                 direction LR
-                API1[API Server 1];
-                API2[API Server 2];
-                APIN[API Server N];
+                API_서버_1[API 서버 1];
+                API_서버_2[API 서버 2];
+                API_서버_N[API 서버 N];
             end
         end
-        Proxy -- "Proxies to Optimal Server" --> API2;
+        프록시 -- "최적 서버로 프록시" --> API_서버_2;
     end
 
     subgraph "주기적인 메트릭 수집 (1분마다)"
-        EventBridge[AWS EventBridge] -- Triggers --> Lambda[AWS Lambda];
-        Lambda -- "GET /metrics" --> API1;
-        Lambda -- "GET /metrics" --> API2;
-        Lambda -- "GET /metrics" --> APIN;
-        API1 --> Lambda;
-        API2 --> Lambda;
-        APIN --> Lambda;
-        Lambda -- "Push Metrics" --> Prometheus[Prometheus Server];
-        Lambda -- "Update Server Status" --> Router;
+        EventBridge[AWS EventBridge] --> 메트릭_Lambda(메트릭 Lambda - Python);
+        메트릭_Lambda -- "GET /metrics" --> API_서버_1;
+        메트릭_Lambda -- "GET /metrics" --> API_서버_2;
+        메트릭_Lambda -- "GET /metrics" --> API_서버_N;
+        API_서버_1 --> 메트릭_Lambda;
+        API_서버_2 --> 메트릭_Lambda;
+        API_서버_N --> 메트릭_Lambda;
+        메트릭_Lambda -- "메트릭 전송" --> 프로메테우스_서버[프로메테우스 서버];
+        메트릭_Lambda -- "서버 상태 업데이트" --> 라우터;
     end
 
-    style Router fill:#f9f,stroke:#333,stroke-width:2px
+    style 라우터 fill:#f9f,stroke:#333,stroke-width:2px
 ```
 
 ### 보안 강화 (Security Enhancements)
 
 1.  **라우터 레벨 접근 제어 (Nginx Whitelist)**
-    *   `Router` 서버(Nginx)는 사전에 정의된 API 엔드포인트에 대한 요청만 허용하는 **화이트리스트** 기반으로 동작합니다.
+    *   `Router` 서버(Nginx)는 사전에 정의된 API 엔드포인트(e.g., `/api/v1/search`)에 대한 요청만 허용하는 **화이트리스트** 기반으로 동작합니다.
     *   화이트리스트에 존재하지 않는 모든 경로로의 요청은 `404 Not Found`로 처리되어, 불필요한 내부 시스템 접근을 원천적으로 차단합니다.
 
 2.  **네트워크 레벨 접근 제어 (AWS Security Group)**
@@ -140,7 +137,8 @@ graph TD
 ## 🛠️ 기술 스택 (Tech Stack)
 
 -   **Backend**: Go
+-   **Automation (Lambda)**: Go, Python
 -   **API**: REST, Server-Sent Events (SSE)
--   **Cloud Services**: AWS Lambda, SQS, DynamoDB
+-   **Cloud Services**: AWS Lambda, SQS, DynamoDB, S3, EventBridge
 -   **Infrastructure**: Docker, Nginx
 -   **CI/CD**: GitHub Actions
